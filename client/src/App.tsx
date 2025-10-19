@@ -1,16 +1,16 @@
 
 import './App.css'
+import Header from './components/layout/header';
+import { ThemeProvider } from './components/theme-provider';
+import Home from './pages/Home';
 
 function App() {
 
-  
-  const num = Math.random();
-
-
   return (
-    <>
-     <div>Hello World! {num}</div>
-    </>
+    <ThemeProvider defaultTheme='dark' storageKey='vite-ui-theme'>
+      <Header />
+        <Home />
+    </ThemeProvider>
   )
 }
 
