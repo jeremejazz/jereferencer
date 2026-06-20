@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import Map from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
+import ImageLayer from "ol/layer/Image";
+import Static from "ol/source/ImageStatic";
 import OSM from "ol/source/OSM";
 import Overlay from "ol/Overlay";
-import { fromLonLat, toLonLat } from "ol/proj";
+import { fromLonLat, toLonLat, transformExtent } from "ol/proj";
 import { parseCoordinates } from "../lib/searchParser";
 import { Search, Globe2 } from "lucide-react";
 
@@ -15,11 +17,14 @@ interface MapPaneProps {
   isAddCoordinatesActive: boolean;
   onAddMapPin: (coords: [number, number]) => void;
   onDeletePin: (id: string) => void;
+  warpedImageDataUrl: string | null;
+  overlayExtent: [number, number, number, number] | null; // [minLon, minLat, maxLon, maxLat]
 }
 
-export function MapPane({ pins, isAddCoordinatesActive, onAddMapPin, onDeletePin }: MapPaneProps) {
+export function MapPane({ pins, isAddCoordinatesActive, onAddMapPin, onDeletePin, warpedImageDataUrl, overlayExtent }: MapPaneProps) {
   const mapElement = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<Map | null>(null);
+  const overlayLayerRef = useRef<ImageLayer<Static> | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -65,6 +70,35 @@ export function MapPane({ pins, isAddCoordinatesActive, onAddMapPin, onDeletePin
       }
     };
   }, []);
+
+  // ---- Render warped image overlay on the map (Task 4.3) ----
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map) return;
+
+    // Remove old overlay layer if it exists
+    if (overlayLayerRef.current) {
+      map.removeLayer(overlayLayerRef.current);
+      overlayLayerRef.current = null;
+    }
+
+    if (!warpedImageDataUrl || !overlayExtent) return;
+
+    // Transform extent from EPSG:4326 (lon/lat) to EPSG:3857 (Web Mercator)
+    const extent3857 = transformExtent(overlayExtent, "EPSG:4326", "EPSG:3857");
+
+    const overlayLayer = new ImageLayer({
+      source: new Static({
+        url: warpedImageDataUrl,
+        imageExtent: extent3857,
+      }),
+      opacity: 0.75,
+      zIndex: 5,
+    });
+
+    map.addLayer(overlayLayer);
+    overlayLayerRef.current = overlayLayer;
+  }, [warpedImageDataUrl, overlayExtent]);
 
   useEffect(() => {
     const map = mapInstance.current;

@@ -27,11 +27,11 @@ The system SHALL render an OpenLayers map instance in the left pane, configured 
 - **THEN** an OpenLayers map instance SHALL initialize and load OpenStreetMap tiles successfully
 
 ### Requirement: Static Image Source View
-The system SHALL render an OpenLayers map instance in the right pane configured to load and display a dynamic image file or the default placeholder image `ed-259-xcrI6CPkkJs-unsplash.jpg` as a static image source.
+The system SHALL render an OpenLayers map instance in the right pane only when a dynamic image file has been uploaded by the user. If no image has been uploaded, it SHALL display an upload prompt placeholder.
 
 #### Scenario: Static Image Initialization
-- **WHEN** the image pane is rendered
-- **THEN** it SHALL load the default or user-uploaded static image file using OpenLayers on a pixel coordinate system
+- **WHEN** the image pane is rendered and no image has been uploaded
+- **THEN** it SHALL display a placeholder/upload prompt instructing the user to upload a local image
 
 ### Requirement: Dynamic Image Upload
 The static image pane SHALL allow the user to click the Upload Image button to browse and select a local image file, replacing the currently loaded image.
