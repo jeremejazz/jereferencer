@@ -3,15 +3,33 @@ import Map from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
 import OSM from "ol/source/OSM";
-import { fromLonLat } from "ol/proj";
+import Overlay from "ol/Overlay";
+import { fromLonLat, toLonLat } from "ol/proj";
 import { parseCoordinates } from "../lib/searchParser";
 import { Search, Globe2 } from "lucide-react";
 
-export function MapPane() {
+import { Pin } from "./MainDashboard";
+
+interface MapPaneProps {
+  pins: Pin[];
+  isAddCoordinatesActive: boolean;
+  onAddMapPin: (coords: [number, number]) => void;
+  onDeletePin: (id: string) => void;
+}
+
+export function MapPane({ pins, isAddCoordinatesActive, onAddMapPin, onDeletePin }: MapPaneProps) {
   const mapElement = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<Map | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  const activeRef = useRef(isAddCoordinatesActive);
+  const onAddMapPinRef = useRef(onAddMapPin);
+
+  useEffect(() => {
+    activeRef.current = isAddCoordinatesActive;
+    onAddMapPinRef.current = onAddMapPin;
+  }, [isAddCoordinatesActive, onAddMapPin]);
 
   useEffect(() => {
     if (!mapElement.current || mapInstance.current) return;
@@ -31,6 +49,13 @@ export function MapPane() {
       controls: [], // Hide default controls for custom styling
     });
 
+    map.on('singleclick', (e) => {
+      if (activeRef.current) {
+        const coords = toLonLat(e.coordinate);
+        onAddMapPinRef.current([coords[0], coords[1]]);
+      }
+    });
+
     mapInstance.current = map;
 
     return () => {
@@ -40,6 +65,35 @@ export function MapPane() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map) return;
+
+    map.getOverlays().clear();
+
+    pins.forEach((pin, index) => {
+      if (pin.mapCoords) {
+        const el = document.createElement("div");
+        el.className = "w-6 h-6 bg-emerald-500 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-lg border-2 border-white cursor-pointer select-none z-50 transition-transform hover:scale-110";
+        el.innerText = (index + 1).toString();
+
+        el.oncontextmenu = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onDeletePin(pin.id);
+        };
+
+        const overlay = new Overlay({
+          position: fromLonLat(pin.mapCoords),
+          positioning: "center-center",
+          element: el,
+          stopEvent: true,
+        });
+        map.addOverlay(overlay);
+      }
+    });
+  }, [pins, onDeletePin]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
