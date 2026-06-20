@@ -33,20 +33,24 @@ To fix coordinate calculation bugs in the drawing tool:
   - `const coord = map.getCoordinateFromPixel(pixel);`
 - This ensures OpenLayers handles viewport offsets, CSS scales, and overlay target intersections internally, returning correct pixel-space coordinate values under all circumstances.
 
-### Decision 3: Path Sanitization and File Existence Validation in Rust Backend
-To resolve `gdal_translate` errors such as `ERROR 4: No such file or directory` (encountered when the frontend passes virtual Tauri URLs or paths with virtual/incorrect spaces/prefixes):
-1. **URI Sanitization**:
-   - The Rust `warp_image` backend will sanitize the `image_path` string by stripping known virtual URL schemes (e.g., `asset://localhost/`, `asset://`, `http://localhost/`).
-   - If the path is URL-encoded (e.g., spaces replaced with `%20`), we will decode it (e.g., using `url::percent_encoding` or a basic string replace if appropriate, or a standard decoding technique in Rust) to form a valid system path.
-2. **Existence Check**:
-   - Verify that the resulting local file exists using `std::path::Path::new(&sanitized_path).exists()`.
-   - If it doesn't exist, fail early and return a helpful error message to the frontend: `Input image file does not exist at path: <resolved_path>`.
+### Decision 3: Project-Relative Temporary Directory for File Uploads and Warping
+To completely resolve path translation and browser-level security restrictions (which prevent accessing raw filesystem absolute paths):
+1. **Frontend-to-Backend Uploading**:
+   - The frontend will read selected image files as array buffers/bytes and send them to the Tauri backend using a new `upload_image_bytes` command.
+   - The Rust backend will save these bytes to a project-relative temporary directory: `public/temp_uploads/`.
+   - The backend will return a web URL path (e.g. `/temp_uploads/<filename>`) and the absolute path on the host system.
+2. **Local GDAL Warping**:
+   - `warp_image` will receive the absolute system path of the uploaded file within `public/temp_uploads/`.
+   - It will run the two-stage GDAL pipeline.
+   - It will output the warped PNG directly to `public/temp_uploads/<filename_stem>_warped.png`.
+3. **Web-Accessible Overlay**:
+   - The backend will return the relative web URL `/temp_uploads/<filename_stem>_warped.png` to the frontend.
+   - The frontend will load this image URL on the OpenLayers overlay using the Vite dev server's static file serving, bypassing complex base64 encoding/decoding and asset protocol limitations.
 
 ## Risks / Trade-offs
 
-- **[Risk]**: `gdal_translate` or `gdalwarp` commands fail, or have strict write permissions.
-  - **Mitigation**: Perform commands in the application's secure cache directory (`app_cache_dir()`). Use robust standard-error output logging in the Tauri response for better debugging.
-- **[Risk]**: Temporary files are left behind on command failure.
-  - **Mitigation**: Wrap the execution in Rust with cleanup logic that attempts to remove the temporary TIFF files regardless of execution success or failure.
-- **[Risk]**: The input path contains URL-encoded characters (like `%20` for spaces).
-  - **Mitigation**: Percent-decode the file path before testing for its existence and passing it to the GDAL CLI.
+- **[Risk]**: Temporary files are left behind on disk.
+  - **Mitigation**: Add a directory cleanup script or command, or rely on `.gitignore` to ensure `public/temp_uploads/` is never committed to git.
+- **[Risk]**: Cache issues when re-warping the same image.
+  - **Mitigation**: Append a timestamp cache-buster query parameter (e.g., `?t=TIMESTAMP`) when reloading the warped image on the map overlay.
+
