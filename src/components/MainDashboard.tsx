@@ -242,7 +242,8 @@ export function MainDashboard() {
         gcps: adjustedGcps,
       });
 
-      setWarpedImageDataUrl(dataUrl);
+      const timestampedUrl = `${dataUrl}?t=${Date.now()}`;
+      setWarpedImageDataUrl(timestampedUrl);
       setLastWarpKey(warpKey);
       setIsOverlayActive(true);
     } catch (err) {

@@ -11,7 +11,10 @@ import { getCenter } from "ol/extent";
 import Feature from "ol/Feature";
 import { Polygon as OlPolygon } from "ol/geom";
 import { Style, Fill, Stroke } from "ol/style";
+import DragPan from "ol/interaction/DragPan";
+import { invoke } from "@tauri-apps/api/core";
 import { Layers, Crop, Scissors, RotateCw, Info, Upload, Lock, MapPin, Loader2 } from "lucide-react";
+
 
 import { Pin, CropBounds } from "./MainDashboard";
 
@@ -160,12 +163,13 @@ export function ImagePane({
     });
 
     // ---- Crop drag drawing (Task 2.3) ----
-    // Use DOM events for pointerdown/pointerup since OL Map doesn't expose these
+    // Use DOM events for pointerdown/pointermove/pointerup since OL Map doesn't expose these during drag
     const viewport = map.getViewport();
 
     const handlePointerDown = (evt: PointerEvent) => {
       if (!isCropActiveRef.current) return;
-      const pixel: [number, number] = [evt.offsetX, evt.offsetY];
+      evt.preventDefault();
+      const pixel = map.getEventPixel(evt);
       const coord = map.getCoordinateFromPixel(pixel);
       if (coord) {
         cropStartRef.current = coord as [number, number];
@@ -173,11 +177,40 @@ export function ImagePane({
       }
     };
 
+    const handlePointerMove = (evt: PointerEvent) => {
+      if (!isDraggingCropRef.current || !cropStartRef.current) return;
+      evt.preventDefault();
+      const pixel = map.getEventPixel(evt);
+      const coord = map.getCoordinateFromPixel(pixel);
+      if (!coord) return;
+
+      const [startX, startY] = cropStartRef.current;
+      const [endX, endY] = coord as [number, number];
+
+      const minX = Math.min(startX, endX);
+      const minY = Math.min(startY, endY);
+      const maxX = Math.max(startX, endX);
+      const maxY = Math.max(startY, endY);
+
+      // Update the crop rect preview
+      cropRectSourceRef.current?.clear();
+      const rectCoords = [
+        [minX, minY],
+        [maxX, minY],
+        [maxX, maxY],
+        [minX, maxY],
+        [minX, minY],
+      ];
+      cropRectSourceRef.current?.addFeature(
+        new Feature(new OlPolygon([rectCoords]))
+      );
+    };
+
     const handlePointerUp = (evt: PointerEvent) => {
       if (!isDraggingCropRef.current || !cropStartRef.current) return;
       isDraggingCropRef.current = false;
 
-      const pixel: [number, number] = [evt.offsetX, evt.offsetY];
+      const pixel = map.getEventPixel(evt);
       const coord = map.getCoordinateFromPixel(pixel);
       if (!coord) {
         cropStartRef.current = null;
@@ -206,36 +239,14 @@ export function ImagePane({
     };
 
     viewport.addEventListener("pointerdown", handlePointerDown);
+    viewport.addEventListener("pointermove", handlePointerMove);
     viewport.addEventListener("pointerup", handlePointerUp);
-
-    map.on("pointermove", (e) => {
-      if (!isDraggingCropRef.current || !cropStartRef.current) return;
-      const [startX, startY] = cropStartRef.current;
-      const [endX, endY] = e.coordinate as [number, number];
-
-      const minX = Math.min(startX, endX);
-      const minY = Math.min(startY, endY);
-      const maxX = Math.max(startX, endX);
-      const maxY = Math.max(startY, endY);
-
-      // Update the crop rect preview
-      cropRectSourceRef.current?.clear();
-      const rectCoords = [
-        [minX, minY],
-        [maxX, minY],
-        [maxX, maxY],
-        [minX, maxY],
-        [minX, minY],
-      ];
-      cropRectSourceRef.current?.addFeature(
-        new Feature(new OlPolygon([rectCoords]))
-      );
-    });
 
     mapInstance.current = map;
 
     return () => {
       viewport.removeEventListener("pointerdown", handlePointerDown);
+      viewport.removeEventListener("pointermove", handlePointerMove);
       viewport.removeEventListener("pointerup", handlePointerUp);
       map.setTarget(undefined);
       mapInstance.current = null;
@@ -245,6 +256,18 @@ export function ImagePane({
       cropRectSourceRef.current = null;
     };
   }, [uploadedImageUrl, imageDimensions]);
+
+  // ---- Disable DragPan when crop mode is active to prevent map panning conflict ----
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map) return;
+    const dragPan = map.getInteractions().getArray().find(
+      (interaction) => interaction instanceof DragPan
+    );
+    if (dragPan) {
+      dragPan.setActive(!isCropActive);
+    }
+  }, [isCropActive]);
 
   // ---- Render spotlight overlay when crop bounds change (Task 2.4) ----
   useEffect(() => {
@@ -315,26 +338,40 @@ export function ImagePane({
     fileInputRef.current?.click();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (uploadedImageUrl) {
-        URL.revokeObjectURL(uploadedImageUrl);
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+        
+        // Save the image bytes to public/temp_uploads/ relative to the project root
+        const uploadResult = await invoke<{ absolute_path: string; web_url: string }>(
+          "upload_image_bytes",
+          {
+            filename: file.name,
+            bytes: Array.from(bytes),
+          }
+        );
+        
+        const webUrl = uploadResult.web_url;
+        const absPath = uploadResult.absolute_path;
+        
+        if (uploadedImageUrl && uploadedImageUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(uploadedImageUrl);
+        }
+
+        const img = new Image();
+        img.onload = () => {
+          onImageUploaded(webUrl, [img.naturalWidth, img.naturalHeight], absPath);
+        };
+        img.src = webUrl;
+      } catch (err) {
+        setMessage(`Failed to upload image: ${err}`);
+        setTimeout(() => setMessage(null), 3000);
+      } finally {
+        e.target.value = "";
       }
-      const objUrl = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => {
-        // For Tauri file paths, we need the webkitRelativePath or name.
-        // Since we're using object URLs, we'll store the file path if available.
-        // Note: browser security prevents getting the full path from file input.
-        // The user will need to provide the path via a Tauri open dialog in a future enhancement.
-        // For now, store the file name.
-        const filePath = (file as any).path || file.name;
-        onImageUploaded(objUrl, [img.naturalWidth, img.naturalHeight], filePath);
-      };
-      img.src = objUrl;
-      // Reset input value so same file can be selected again
-      e.target.value = "";
     }
   };
 
