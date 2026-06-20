@@ -12,6 +12,11 @@ export interface Pin {
 
 export type CropBounds = [number, number, number, number]; // [minX, minY, maxX, maxY]
 
+interface WarpResult {
+  web_url: string;
+  extent: [number, number, number, number];
+}
+
 export function MainDashboard() {
   const [pins, setPins] = useState<Pin[]>([]);
   const [isAddCoordinatesActive, setIsAddCoordinatesActive] = useState(false);
@@ -28,6 +33,7 @@ export function MainDashboard() {
   // Overlay / warp state (Tasks 4.1, 4.2)
   const [isOverlayActive, setIsOverlayActive] = useState(false);
   const [warpedImageDataUrl, setWarpedImageDataUrl] = useState<string | null>(null);
+  const [warpedExtent, setWarpedExtent] = useState<[number, number, number, number] | null>(null);
   const [isWarping, setIsWarping] = useState(false);
   const [lastWarpKey, setLastWarpKey] = useState<string | null>(null);
 
@@ -45,6 +51,7 @@ export function MainDashboard() {
     setIsAddCoordinatesActive(false);
     setIsOverlayActive(false);
     setWarpedImageDataUrl(null);
+    setWarpedExtent(null);
     setLastWarpKey(null);
 
     setUploadedImageUrl(url);
@@ -193,7 +200,7 @@ export function MainDashboard() {
       imagePath: uploadedImagePath,
     });
 
-    if (warpKey === lastWarpKey && warpedImageDataUrl) {
+    if (warpKey === lastWarpKey && warpedImageDataUrl && warpedExtent) {
       // No changes since last warp, reuse cached result
       setIsOverlayActive(true);
       return;
@@ -236,14 +243,15 @@ export function MainDashboard() {
         };
       });
 
-      const dataUrl = await invoke<string>("warp_image", {
+      const warpResult = await invoke<WarpResult>("warp_image", {
         imagePath: uploadedImagePath,
         crop: cropParam,
         gcps: adjustedGcps,
       });
 
-      const timestampedUrl = `${dataUrl}?t=${Date.now()}`;
+      const timestampedUrl = `${warpResult.web_url}?t=${Date.now()}`;
       setWarpedImageDataUrl(timestampedUrl);
+      setWarpedExtent(warpResult.extent);
       setLastWarpKey(warpKey);
       setIsOverlayActive(true);
     } catch (err) {
@@ -254,21 +262,11 @@ export function MainDashboard() {
   }, [
     isOverlayActive, pins, cropBounds, uploadedImagePath,
     imageDimensions, arePointsColinear, lastWarpKey,
-    warpedImageDataUrl, showValidation,
+    warpedImageDataUrl, warpedExtent, showValidation,
   ]);
 
-  // Compute geographic extent from paired map coords for the overlay
-  const overlayExtent = (() => {
-    if (!isOverlayActive || !warpedImageDataUrl) return null;
-    const pairedPins = pins.filter(p => p.imageCoords && p.mapCoords);
-    if (pairedPins.length < 3) return null;
-    const lons = pairedPins.map(p => p.mapCoords![0]);
-    const lats = pairedPins.map(p => p.mapCoords![1]);
-    return [
-      Math.min(...lons), Math.min(...lats),
-      Math.max(...lons), Math.max(...lats),
-    ] as [number, number, number, number];
-  })();
+  // Geographic extent returned from the backend warp process
+  const overlayExtent = isOverlayActive ? warpedExtent : null;
 
   return (
     <div className="flex-1 w-full h-full flex flex-col min-h-0">
