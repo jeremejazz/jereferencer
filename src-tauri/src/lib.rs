@@ -102,6 +102,41 @@ pub struct UploadResult {
     pub web_url: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct WarpResult {
+    pub web_url: String,
+    pub extent: [f64; 4],
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CornerCoordinates {
+    upper_left: [f64; 2],
+    lower_left: [f64; 2],
+    upper_right: [f64; 2],
+    lower_right: [f64; 2],
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GdalInfoOutput {
+    corner_coordinates: CornerCoordinates,
+}
+
+struct CleanupGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            if path.exists() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
 /// Tauri command that saves raw image bytes from the frontend into the project's
 /// local `public/temp_uploads/` directory, resolving browser path security constraints.
 #[tauri::command]
@@ -131,7 +166,7 @@ fn upload_image_bytes(filename: String, bytes: Vec<u8>) -> Result<UploadResult, 
 }
 
 /// Tauri command that crops (optionally) and warps an image using GDAL CLI tools,
-/// then returns the relative web URL for the warped image.
+/// then returns the relative web URL for the warped image and its geographic extent.
 ///
 /// # Arguments
 /// * `app_handle` – tauri app handle
@@ -144,7 +179,7 @@ fn warp_image(
     image_path: String,
     crop: Option<[f64; 4]>,
     gcps: Vec<Gcp>,
-) -> Result<String, String> {
+) -> Result<WarpResult, String> {
     let mut clean_path = image_path.clone();
     if clean_path.starts_with("asset://localhost/") {
         clean_path = clean_path.replacen("asset://localhost/", "", 1);
@@ -230,7 +265,13 @@ fn warp_image(
     }
 
     let georef_path = temp_dir.join(format!("{}_georef.tif", file_stem));
-    let warped_path = temp_dir.join(format!("{}_warped.png", file_stem));
+    let warped_tif_path = temp_dir.join(format!("{}_warped.tif", file_stem));
+    let warped_png_path = temp_dir.join(format!("{}_warped.png", file_stem));
+
+    // Register files for auto-cleanup on scope exit/failure
+    let _cleanup = CleanupGuard {
+        paths: vec![georef_path.clone(), warped_tif_path.clone()],
+    };
 
     // Stage 1: gdal_translate to add GCPs to an intermediate GeoTIFF
     let mut translate_cmd = Command::new("gdal_translate");
@@ -261,34 +302,97 @@ fn warp_image(
         return Err(format!("gdal_translate (GCP assignment) failed: {}", stderr));
     }
 
-    // Stage 2: gdalwarp on the intermediate GeoTIFF
+    // Stage 2: gdalwarp on the intermediate GeoTIFF to create warped GeoTIFF
     let output_warp = Command::new("gdalwarp")
         .arg("-tps")
         .arg("-overwrite")
+        .arg("-dstalpha")
         .arg("-of")
-        .arg("PNG")
+        .arg("GTiff")
+        .arg("-co")
+        .arg("COMPRESS=DEFLATE")
+        .arg("-t_srs")
+        .arg("EPSG:4326")
         .arg(georef_path.to_string_lossy().as_ref())
-        .arg(warped_path.to_string_lossy().as_ref())
+        .arg(warped_tif_path.to_string_lossy().as_ref())
         .output()
         .map_err(|e| {
-            let _ = fs::remove_file(&georef_path); // Cleanup on spawn error
             format!(
                 "Failed to execute gdalwarp. Is GDAL installed and in PATH? Error: {}",
                 e
             )
         })?;
 
-    // Cleanup intermediate file
-    let _ = fs::remove_file(&georef_path);
-
     if !output_warp.status.success() {
         let stderr = String::from_utf8_lossy(&output_warp.stderr);
         return Err(format!("gdalwarp failed: {}", stderr));
     }
 
-    // Return the relative web URL for the warped PNG served by Vite
+    // Stage 3: run gdalinfo to get the extent of the warped GeoTIFF
+    let output_info = Command::new("gdalinfo")
+        .arg("-json")
+        .arg(warped_tif_path.to_string_lossy().as_ref())
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to execute gdalinfo. Is GDAL installed and in PATH? Error: {}",
+                e
+            )
+        })?;
+
+    if !output_info.status.success() {
+        let stderr = String::from_utf8_lossy(&output_info.stderr);
+        return Err(format!("gdalinfo failed: {}", stderr));
+    }
+
+    let info_str = String::from_utf8_lossy(&output_info.stdout);
+    let info_json: GdalInfoOutput = serde_json::from_str(&info_str)
+        .map_err(|e| format!("Failed to parse gdalinfo JSON: {}. Output: {}", e, info_str))?;
+
+    let corners = info_json.corner_coordinates;
+    let lons = [
+        corners.upper_left[0],
+        corners.lower_left[0],
+        corners.upper_right[0],
+        corners.lower_right[0],
+    ];
+    let lats = [
+        corners.upper_left[1],
+        corners.lower_left[1],
+        corners.upper_right[1],
+        corners.lower_right[1],
+    ];
+
+    let min_lon = lons.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_lon = lons.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min_lat = lats.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_lat = lats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let extent = [min_lon, min_lat, max_lon, max_lat];
+
+    // Stage 4: convert intermediate warped GeoTIFF to final transparent PNG
+    let output_translate_png = Command::new("gdal_translate")
+        .arg("-of")
+        .arg("PNG")
+        .arg("-co")
+        .arg("WORLDFILE=NO")
+        .arg(warped_tif_path.to_string_lossy().as_ref())
+        .arg(warped_png_path.to_string_lossy().as_ref())
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to execute gdal_translate for PNG conversion. Is GDAL installed? Error: {}",
+                e
+            )
+        })?;
+
+    if !output_translate_png.status.success() {
+        let stderr = String::from_utf8_lossy(&output_translate_png.stderr);
+        return Err(format!("gdal_translate to PNG failed: {}", stderr));
+    }
+
     let web_url = format!("/temp_uploads/{}_warped.png", file_stem);
-    Ok(web_url)
+    Ok(WarpResult { web_url, extent })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -339,6 +443,43 @@ mod tests {
                 .unwrap_or(clean_path);
             assert_eq!(decoded, expected);
         }
+    }
+
+    #[test]
+    fn test_extent_calculation() {
+        let json_data = r#"{
+            "cornerCoordinates": {
+                "upperLeft": [-122.4, 37.8],
+                "lowerLeft": [-122.4, 37.7],
+                "upperRight": [-122.3, 37.8],
+                "lowerRight": [-122.3, 37.7]
+            }
+        }"#;
+
+        let info_json: GdalInfoOutput = serde_json::from_str(json_data).unwrap();
+        let corners = info_json.corner_coordinates;
+        let lons = [
+            corners.upper_left[0],
+            corners.lower_left[0],
+            corners.upper_right[0],
+            corners.lower_right[0],
+        ];
+        let lats = [
+            corners.upper_left[1],
+            corners.lower_left[1],
+            corners.upper_right[1],
+            corners.lower_right[1],
+        ];
+
+        let min_lon = lons.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_lon = lons.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let min_lat = lats.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_lat = lats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+        assert_eq!(min_lon, -122.4);
+        assert_eq!(max_lon, -122.3);
+        assert_eq!(min_lat, 37.7);
+        assert_eq!(max_lat, 37.8);
     }
 }
 
